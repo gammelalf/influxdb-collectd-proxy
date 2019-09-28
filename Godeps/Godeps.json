@@ -3,9 +3,8 @@
 	"GoVersion": "go1.4.1",
 	"Deps": [
 		{
-			"ImportPath": "github.com/influxdb/influxdb/client",
-			"Comment": "v0.8.6",
-			"Rev": "a0fd0cd03efd284fed64bb598f9c1e5fa1d984e5"
+			"ImportPath": "github.com/influxdata/influxdb1-client",
+			"Rev": "fc22c7df067eefd070157f157893fbce961d6359"
 		},
 		{
 			"ImportPath": "github.com/paulhammond/gocollectd",

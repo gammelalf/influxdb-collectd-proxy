@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	influxdb "github.com/influxdb/influxdb/client"
+	influxdb "github.com/influxdata/influxdb1-client/v2"
 	collectd "github.com/paulhammond/gocollectd"
 )
 
@@ -42,7 +42,8 @@ var (
 	pluginnameAsColumn *bool
 
 	types       Types
-	client      *influxdb.Client
+	client      influxdb.Client
+	bpConfig    influxdb.BatchPointsConfig
 	beforeCache map[string]CacheEntry
 )
 
@@ -82,7 +83,7 @@ func init() {
 	verbose = flag.Bool("verbose", false, "true if you need to trace the requests")
 
 	// influxdb options
-	host = flag.String("influxdb", "localhost:8086", "host:port for influxdb")
+	host = flag.String("influxdb", "http://localhost:8086", "host:port for influxdb")
 	username = flag.String("username", getenvOrDefault(influxDbUsername, "root"), "username for influxdb or $INFLUXDB_PROXY_USERNAME env")
 	password = flag.String("password", getenvOrDefault(influxDbPassword, "root"), "password for influxdb or $INFLUXDB_PROXY_PASSWORD env")
 	database = flag.String("database", getenvOrDefault(influxDbName, ""), "database for influxdb or $INFLUXDB_PROXY_DATABASE env")
@@ -117,12 +118,14 @@ func main() {
 	}
 
 	// make influxdb client
-	client, err = influxdb.NewClient(&influxdb.ClientConfig{
-		Host:     *host,
+	client, err = influxdb.NewHTTPClient(influxdb.HTTPConfig{
+		Addr:     *host,
 		Username: *username,
 		Password: *password,
-		Database: *database,
 	})
+	bpConfig = influxdb.BatchPointsConfig{
+		Database: *database,
+	}
 	if err != nil {
 		log.Fatalf("failed to make a influxdb client: %v\n", err)
 	}
@@ -139,34 +142,39 @@ func main() {
 	go collectd.Listen(*proxyHost+":"+*proxyPort, c)
 	log.Printf("proxy started on %s:%s\n", *proxyHost, *proxyPort)
 	timer := time.Now()
-	var seriesGroup []*influxdb.Series
+	var batchPoints influxdb.BatchPoints
+	batchPoints, err = influxdb.NewBatchPoints(bpConfig)
+	if err != nil {
+		log.Fatalf("failed to create batchpoints: %v\n", err)
+	}
 	for {
 		packet := <-c
-		seriesGroup = append(seriesGroup, processPacket(packet)...)
+		batchPoints.AddPoints(processPacket(packet))
 
-		if time.Since(timer) < influxWriteInterval && len(seriesGroup) < influxWriteLimit {
+		if time.Since(timer) < influxWriteInterval && len(batchPoints.Points()) < influxWriteLimit {
 			continue
 		} else {
-			if len(seriesGroup) > 0 {
-				if err := client.WriteSeries(seriesGroup); err != nil {
-					log.Printf("failed to write series group to influxdb: %s\n", err)
+			if len(batchPoints.Points()) > 0 {
+				if err := client.Write(batchPoints); err != nil {
+					log.Printf("failed to write batchpoints to influxdb: %s\n", err)
 				}
 				if *verbose {
-					log.Printf("[TRACE] wrote %d series\n", len(seriesGroup))
+					log.Printf("[TRACE] wrote %d points\n", len(batchPoints.Points()))
 				}
-				seriesGroup = make([]*influxdb.Series, 0)
+				batchPoints, _ = influxdb.NewBatchPoints(bpConfig)
+				// a possible error is ignored because it would already be caught after first call
 			}
 			timer = time.Now()
 		}
 	}
 }
 
-func processPacket(packet collectd.Packet) []*influxdb.Series {
+func processPacket(packet collectd.Packet) []*influxdb.Point {
 	if *verbose {
 		log.Printf("[TRACE] got a packet: %v\n", packet)
 	}
 
-	var seriesGroup []*influxdb.Series
+	var points []*influxdb.Point
 
 	// for all metrics in the packet
 	for i, _ := range packet.ValueNames() {
@@ -238,35 +246,33 @@ func processPacket(packet collectd.Packet) []*influxdb.Series {
 		}
 
 		if readyToSend {
-			columns := []string{"time", "value"}
-			points_values := []interface{}{timestamp, normalizedValue}
+			fields := make(map[string]interface{})
+			tags := make(map[string]string)
+
+			fields["time"] = timestamp
+			fields["value"] = normalizedValue
 			name_value := name
 
 			// option hostname-as-column is true
 			if *hostnameAsColumn {
 				name_value = nameNoHostname
-				columns = append(columns, "hostname")
-				points_values = append(points_values, hostName)
+				fields["hostname"] = hostName
 			}
 
 			// option pluginname-as-column is true
 			if *pluginnameAsColumn {
-				columns = append(columns, "plugin")
-				points_values = append(points_values, pluginName)
+				fields["plugin"] = pluginName
 			}
 
-			series := &influxdb.Series{
-				Name:    name_value,
-				Columns: columns,
-				Points: [][]interface{}{
-					points_values,
-				},
+			point, err := influxdb.NewPoint(name_value, tags, fields) //, time)
+			if err != nil {
+				log.Fatalf("failed to create point: %v\n", err)
 			}
 			if *verbose {
-				log.Printf("[TRACE] ready to send series: %v\n", series)
+				log.Printf("[TRACE] ready to send point: %v\n", point)
 			}
-			seriesGroup = append(seriesGroup, series)
+			points = append(points, point)
 		}
 	}
-	return seriesGroup
+	return points
 }
