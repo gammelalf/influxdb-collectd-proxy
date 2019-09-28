@@ -71,8 +71,7 @@ RequiredBy=collectd.service
 ## Dependencies
 
 - http://github.com/paulhammond/gocollectd
-- http://github.com/influxdb/influxdb/client
-  - https://github.com/influxdb/influxdb/tree/master/client
+- http://github.com/influxdata/influxdb1-client
 
 ## References
 
